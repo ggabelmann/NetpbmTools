@@ -2,65 +2,109 @@
 open System.IO
 open System.Collections.Generic
 
-type GrayStruct = {Column : int; Row : int; Value : byte}
-type Pixel = 
-    | Gray of GrayStruct
+// Index into source image.
+type SourceIndex = {Index : int}
 
-let funcGetPixels skip numColumns =
-    // After reading 3+ newlines need to switch to processing values
-    // We'll handle that properly later on.
-    // Just use 'skip' var for now.
+// Index into virtual image (ie, the manipulated image).
+type VirtualIndex = {Index : int}
 
-    let allBytes = File.ReadAllBytes "C:\Users\gregg\Downloads\Test.pgm"
+// The position in the virtual image.
+type Position = {Index : VirtualIndex; Column : int; Row : int}
 
-    let allPixels : Pixel array = Array.zeroCreate (allBytes.Length - skip)
+// What to do with a column or two.
+type Action =
+    | Direct of int
+    | Interpolate of int * int
 
-    for index in 0 .. allPixels.Length - 1 do
-        let column = index % numColumns
-        let row = index / numColumns
-        let value = allBytes.[index + skip]
-        allPixels.[index] <- Gray {Column = column; Row = row; Value = value}
+// Line feed.
+let LF = 10uy
 
-    allPixels
+// Generate a set of random numbers.
+let funcRandomNumbers (rnd : System.Random) exclusiveMax count = 
+    let chosen = new HashSet<int> ()
+    while chosen.Count < count do
+        rnd.Next exclusiveMax |> chosen.Add
+    chosen
 
-let funcRandomColumns (rnd : System.Random) max count = 
-    let chosenColumns = new HashSet<int> ()
-    while chosenColumns.Count < count do
-        rnd.Next max |> chosenColumns.Add
-    chosenColumns
+// "exclusiveEnd" must be the number of source columns.
+// Return a mapping from virtual columns to source columns.
+let funcCalcColumnMapping (chosenColumns : HashSet<int>) exclusiveEnd =
+    let mutable mapping = Map.empty
+    let mutable shift = 0
 
-let funcWriteBytes (writer : Stream) (bytes : byte list) = 
-    bytes |> List.iter writer.WriteByte
+    for index in 0 .. exclusiveEnd - 1 do 
+        mapping <- mapping.Add(index + shift, Direct index)
+        if chosenColumns.Contains index then
+            shift <- shift + 1
+            mapping <- mapping.Add(index + shift, Interpolate (index, index + 1))
+    // do assertion here on the number of keys
+    mapping
 
-let funcStretch (columns : HashSet<int>) (aPixel : Pixel) =
-    match aPixel with
-    | Gray gray when columns.Contains gray.Column -> 
-        [gray.Value; gray.Value]
-    | Gray gray -> 
-        [gray.Value]
+// Translate the virtual index into a virtual position.
+let funcCalcVirtualPosition virtualColumns index =
+    {Index = index; Column = index.Index% virtualColumns; Row = index.Index / virtualColumns}
+
+// Translate a virtual Position back into a (possibly interpolated) byte.
+let funcCalcByte (rnd : System.Random) sourceLookup (columnMapping : Map<int, Action>) (virtualPosition : Position) : byte =
+    match columnMapping.TryFind virtualPosition.Column with
+        | Some theMapping ->
+            match theMapping with
+                | Direct d -> sourceLookup (virtualPosition.Row, d)
+                | Interpolate (l, r) ->
+                    if rnd.Next 2 = 0 then
+                        sourceLookup (virtualPosition.Row, l)
+                    else
+                        sourceLookup (virtualPosition.Row, r)
+        | _ -> failwith "missing column"
+
+// "numColumns" is the number of source columns.
+// Lookup a byte from the source image.
+let funcSourceLookup (bytes : byte[]) (skip : SourceIndex) numColumns (row, column) =
+    bytes.[skip.Index + row * numColumns + column]
 
 
 [<EntryPoint>]
 let main argv = 
     printfn "args: %A" argv
     
-    let skip = 39
+    // Hardcoded source image info.
+    let sourcePath = "C:\Users\gregg\Downloads\Test.pgm"
+    let skip : SourceIndex = {Index = 38} // skip some header bytes in the source image.
     let rows = 525
     let columns = 850
-    let chosenColumns = funcRandomColumns (System.Random ()) columns (columns / 10)
-    let dimensions = String.Format ("{0} {1}", columns + chosenColumns.Count, rows)
 
-    use streamWriter = new StreamWriter("C:\Users\gregg\Downloads\Test_stretched.pgm", false)
+    let rnd = System.Random ()
+    
+    // Don't allow the rightmost column to be picked. Add 125 new columns.
+    let chosenColumns = funcRandomNumbers (rnd) (columns - 1) 125
+    let columnMapping = funcCalcColumnMapping chosenColumns columns
+
+    let destPath = "C:\Users\gregg\Downloads\Test_stretched.pgm"
+    use streamWriter = new StreamWriter(destPath, false)
+
+    let virtualColumns = columns + chosenColumns.Count
+    let dimensions = String.Format ("{0} {1}", virtualColumns, rows)
     streamWriter.WriteLine "P5"
     streamWriter.WriteLine dimensions
-    streamWriter.WriteLine "255"
+    streamWriter.Write "255"
     streamWriter.Flush ()
+    // On windows the header contains CRLFs so far.
+    // Now force only a LF to be used because IrfanView expects a single byte newline char after the "255".
+    streamWriter.BaseStream.WriteByte LF
 
-    // Accepts a pixel, possibly expands it, and then writes it out.
-    let funcHandlePixel = (funcStretch chosenColumns) >> (funcWriteBytes streamWriter.BaseStream)
+    let allBytes = File.ReadAllBytes sourcePath
+
+    let interpolateAndWrite =
+        (funcCalcVirtualPosition virtualColumns) >>
+        (funcCalcByte rnd (funcSourceLookup allBytes skip columns) columnMapping) >>
+        streamWriter.BaseStream.WriteByte
     
-    // Load the pixels, handle each one, and then close the stream.
-    (funcGetPixels skip columns) |> Array.iter funcHandlePixel
+    seq {
+        for i in 0 .. virtualColumns * rows - 1 do
+            yield {Index = i}
+    }
+    |> Seq.iter interpolateAndWrite
+
     streamWriter.Close()
 
     Console.WriteLine "press Enter to finish..."
