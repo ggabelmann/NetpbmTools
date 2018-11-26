@@ -28,18 +28,18 @@ let funcRandomNumbers (rnd : System.Random) exclusiveMax count =
     chosen
 
 // "exclusiveEnd" must be the number of source columns.
-// Return a mapping from virtual columns to source columns.
-let funcCalcColumnMapping (skipColumns : HashSet<int>) (chosenColumns : HashSet<int>) exclusiveEnd =
+// Returns a mapping from virtual rows to source rows (or virtual columns to source columns).
+let funcCalcMapping (remove : HashSet<int>) (interpolate : HashSet<int>) exclusiveEnd =
     let mutable mapping = Map.empty
     let mutable shift = 0
 
     for index in 0 .. exclusiveEnd - 1 do
-        if skipColumns.Contains index then
+        if remove.Contains index then
             shift <- shift - 1
         else
             mapping <- mapping.Add(index + shift, Direct index)
         
-        if chosenColumns.Contains index then
+        if interpolate.Contains index then
             shift <- shift + 1
             mapping <- mapping.Add(index + shift, Interpolate (index, index + 1))
     // do assertion here on the number of keys
@@ -50,22 +50,36 @@ let funcCalcVirtualPosition virtualColumns index =
     {Index = index; Column = index.Index% virtualColumns; Row = index.Index / virtualColumns}
 
 // Translate a virtual Position back into a (possibly interpolated) byte.
-let funcCalcByte (rnd : System.Random) sourceLookup (columnMapping : Map<int, Action>) (virtualPosition : Position) : byte =
-    match columnMapping.TryFind virtualPosition.Column with
-        | Some theMapping ->
-            match theMapping with
-                | Direct d -> sourceLookup (virtualPosition.Row, d)
-                | Interpolate (l, r) ->
-                    if rnd.Next 2 = 0 then
-                        sourceLookup (virtualPosition.Row, l)
-                    else
-                        sourceLookup (virtualPosition.Row, r)
-        | _ -> failwith "missing column"
+let funcCalcByte (rnd : System.Random) sourceLookup (rowMapping : Map<int, Action>) (columnMapping : Map<int, Action>) (virtualPosition : Position) : byte =
+    let sourceRow =
+        match rowMapping.TryFind virtualPosition.Row with
+            | Some theMapping ->
+                match theMapping with
+                    | Direct d -> d
+                    | Interpolate (l, r) ->
+                        if rnd.Next 2 = 0 then
+                            l
+                        else
+                            r
+            | _ -> failwith "missing row"
 
-// "numColumns" is the number of source columns.
+    let sourceColumn =
+        match columnMapping.TryFind virtualPosition.Column with
+            | Some theMapping ->
+                match theMapping with
+                    | Direct d -> d
+                    | Interpolate (l, r) ->
+                        if rnd.Next 2 = 0 then
+                            l
+                        else
+                            r
+            | _ -> failwith "missing column"
+    
+    sourceLookup (sourceRow, sourceColumn)
+
 // Lookup a byte from the source image.
-let funcSourceLookup (bytes : byte[]) (skip : SourceIndex) numColumns (row, column) =
-    bytes.[skip.Index + row * numColumns + column]
+let funcSourceLookup (bytes : byte[]) (skip : SourceIndex) numSourceColumns (sourceRow, sourceColumn) =
+    bytes.[skip.Index + sourceRow * numSourceColumns + sourceColumn]
 
 
 [<EntryPoint>]
@@ -81,16 +95,21 @@ let main argv =
     let rnd = System.Random ()
     
     // Remove 85 columns.
-    let removeColumns = funcRandomNumbers (rnd) columns 170
+    let removeColumns = funcRandomNumbers (rnd) columns 85
     // Add 85 new columns. Don't allow the rightmost column to be picked because of the way the interpolation alg works.
-    let chosenColumns = funcRandomNumbers (rnd) (columns - 1) 170
-    let columnMapping = funcCalcColumnMapping removeColumns chosenColumns columns
+    let chosenColumns = funcRandomNumbers (rnd) (columns - 1) 85
+    let columnMapping = funcCalcMapping removeColumns chosenColumns columns
+
+    let removeRows = funcRandomNumbers (rnd) rows 52
+    let chosenRows = funcRandomNumbers (rnd) (rows - 1) 52
+    let rowMapping = funcCalcMapping removeRows chosenRows rows
 
     let destPath = "C:\Users\gregg\Downloads\Test_stretched.pgm"
     use streamWriter = new StreamWriter(destPath, false)
 
+    let virtualRows = rows - removeRows.Count + chosenRows.Count
     let virtualColumns = columns - removeColumns.Count + chosenColumns.Count
-    let dimensions = String.Format ("{0} {1}", virtualColumns, rows)
+    let dimensions = String.Format ("{0} {1}", virtualColumns, virtualRows)
     streamWriter.WriteLine "P5"
     streamWriter.WriteLine dimensions
     streamWriter.Write "255"
@@ -103,11 +122,11 @@ let main argv =
 
     let interpolateAndWrite =
         (funcCalcVirtualPosition virtualColumns) >>
-        (funcCalcByte rnd (funcSourceLookup allBytes skip columns) columnMapping) >>
+        (funcCalcByte rnd (funcSourceLookup allBytes skip columns) rowMapping columnMapping) >>
         streamWriter.BaseStream.WriteByte
     
     seq {
-        for i in 0 .. virtualColumns * rows - 1 do
+        for i in 0 .. virtualColumns * virtualRows - 1 do
             yield {Index = i}
     }
     |> Seq.iter interpolateAndWrite
