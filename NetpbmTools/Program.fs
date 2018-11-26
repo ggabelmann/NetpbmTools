@@ -22,18 +22,23 @@ let LF = 10uy
 // Generate a set of random numbers.
 let funcRandomNumbers (rnd : System.Random) exclusiveMax count = 
     let chosen = new HashSet<int> ()
+    
     while chosen.Count < count do
         rnd.Next exclusiveMax |> chosen.Add
     chosen
 
 // "exclusiveEnd" must be the number of source columns.
 // Return a mapping from virtual columns to source columns.
-let funcCalcColumnMapping (chosenColumns : HashSet<int>) exclusiveEnd =
+let funcCalcColumnMapping (skipColumns : HashSet<int>) (chosenColumns : HashSet<int>) exclusiveEnd =
     let mutable mapping = Map.empty
     let mutable shift = 0
 
-    for index in 0 .. exclusiveEnd - 1 do 
-        mapping <- mapping.Add(index + shift, Direct index)
+    for index in 0 .. exclusiveEnd - 1 do
+        if skipColumns.Contains index then
+            shift <- shift - 1
+        else
+            mapping <- mapping.Add(index + shift, Direct index)
+        
         if chosenColumns.Contains index then
             shift <- shift + 1
             mapping <- mapping.Add(index + shift, Interpolate (index, index + 1))
@@ -75,14 +80,16 @@ let main argv =
 
     let rnd = System.Random ()
     
-    // Don't allow the rightmost column to be picked. Add 125 new columns.
-    let chosenColumns = funcRandomNumbers (rnd) (columns - 1) 125
-    let columnMapping = funcCalcColumnMapping chosenColumns columns
+    // Remove 85 columns.
+    let removeColumns = funcRandomNumbers (rnd) columns 170
+    // Add 85 new columns. Don't allow the rightmost column to be picked because of the way the interpolation alg works.
+    let chosenColumns = funcRandomNumbers (rnd) (columns - 1) 170
+    let columnMapping = funcCalcColumnMapping removeColumns chosenColumns columns
 
     let destPath = "C:\Users\gregg\Downloads\Test_stretched.pgm"
     use streamWriter = new StreamWriter(destPath, false)
 
-    let virtualColumns = columns + chosenColumns.Count
+    let virtualColumns = columns - removeColumns.Count + chosenColumns.Count
     let dimensions = String.Format ("{0} {1}", virtualColumns, rows)
     streamWriter.WriteLine "P5"
     streamWriter.WriteLine dimensions
