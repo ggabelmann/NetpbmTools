@@ -2,16 +2,14 @@
 open System.IO
 open System.Collections.Generic
 
-// Index into source image.
-type SourceIndex = {Index : int}
+type Image =
+    | Source
+    | Virtual
 
-// Index into virtual image (ie, the manipulated image).
-type VirtualIndex = {Index : int}
+// The position in an image.
+type Position = {Column : int; Row : int; Image : Image}
 
-// The position in the virtual image.
-type Position = {Index : VirtualIndex; Column : int; Row : int}
-
-// What to do with a column or two.
+// What to do with a column/row.
 type Action =
     | Direct of int
     | Interpolate of int * int
@@ -22,9 +20,8 @@ let LF = 10uy
 // Generate a set of random numbers.
 let funcRandomNumbers (rnd : System.Random) exclusiveMax count = 
     let chosen = new HashSet<int> ()
-    
     while chosen.Count < count do
-        rnd.Next exclusiveMax |> chosen.Add
+        rnd.Next exclusiveMax |> chosen.Add |> ignore
     chosen
 
 // "exclusiveEnd" must be the number of source columns.
@@ -45,12 +42,19 @@ let funcCalcMapping (remove : HashSet<int>) (interpolate : HashSet<int>) exclusi
     // do assertion here on the number of keys
     mapping
 
-// Translate the virtual index into a virtual position.
-let funcCalcVirtualPosition virtualColumns index =
-    {Index = index; Column = index.Index% virtualColumns; Row = index.Index / virtualColumns}
+// Translate an index into a virtual Position.
+let funcCalcVirtualPosition columns index =
+    {Column = index % columns; Row = index / columns; Image = Virtual}
 
-// Translate a virtual Position back into a (possibly interpolated) byte.
-let funcCalcByte (rnd : System.Random) sourceLookup (rowMapping : Map<int, Action>) (columnMapping : Map<int, Action>) (virtualPosition : Position) : byte =
+// Translate any kind of Position to an index.
+let funcCalcIndexOfPosition numSourceColumns numVirtualColumns (position : Position) =
+    match position with
+        | position when position.Image = Source -> position.Row * numSourceColumns + position.Column
+        | position when position.Image = Virtual -> position.Row * numVirtualColumns + position.Column
+        | _ -> failwith "unknown image type"
+
+// Translate a virtual Position back into a source Position.
+let funcMapVirtualPosition (rnd : System.Random) (rowMapping : Map<int, Action>) (columnMapping : Map<int, Action>) (virtualPosition : Position) =
     let sourceRow =
         match rowMapping.TryFind virtualPosition.Row with
             | Some theMapping ->
@@ -75,11 +79,7 @@ let funcCalcByte (rnd : System.Random) sourceLookup (rowMapping : Map<int, Actio
                             r
             | _ -> failwith "missing column"
     
-    sourceLookup (sourceRow, sourceColumn)
-
-// Lookup a byte from the source image.
-let funcSourceLookup (bytes : byte[]) (skip : SourceIndex) numSourceColumns (sourceRow, sourceColumn) =
-    bytes.[skip.Index + sourceRow * numSourceColumns + sourceColumn]
+    {Column = sourceColumn; Row = sourceRow; Image = Source}
 
 
 [<EntryPoint>]
@@ -88,7 +88,7 @@ let main argv =
     
     // Hardcoded source image info.
     let sourcePath = "C:\Users\gregg\Downloads\Test.pgm"
-    let skip : SourceIndex = {Index = 38} // skip some header bytes in the source image.
+    let skip = 38 // skip some header bytes in the source image.
     let rows = 525
     let columns = 850
 
@@ -120,15 +120,17 @@ let main argv =
 
     let allBytes = File.ReadAllBytes sourcePath
 
+    // Lookup a byte from the source image.
+    let funcSourceLookup (position : Position) =
+        allBytes.[skip + (funcCalcIndexOfPosition columns virtualColumns position)]
+
     let interpolateAndWrite =
         (funcCalcVirtualPosition virtualColumns) >>
-        (funcCalcByte rnd (funcSourceLookup allBytes skip columns) rowMapping columnMapping) >>
+        (funcMapVirtualPosition rnd rowMapping columnMapping) >>
+        funcSourceLookup >>
         streamWriter.BaseStream.WriteByte
     
-    seq {
-        for i in 0 .. virtualColumns * virtualRows - 1 do
-            yield {Index = i}
-    }
+    seq {0 .. virtualColumns * virtualRows - 1}
     |> Seq.iter interpolateAndWrite
 
     streamWriter.Close()
