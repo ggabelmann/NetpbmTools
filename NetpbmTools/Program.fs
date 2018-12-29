@@ -1,4 +1,16 @@
-﻿open System
+// The design is changing to:
+
+// Overall, the tool loops over a function that translates Positions to Pixels.
+// The input to that function and its output will eventually be stdin/stdout.
+// The implementation of that function will be a DAG of functions:
+//    Position -> Pixel
+//    Position -> Position
+//    Pixel -> Pixel
+
+// Depending on what one wants to do with the tool, the DAG can be assembled in different ways.
+// This should cover my main use cases (stretching and shrinking in different ways).
+
+open System
 open System.IO
 open System.Collections.Generic
 
