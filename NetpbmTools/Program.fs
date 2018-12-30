@@ -15,21 +15,38 @@ open System.IO
 open System.Collections.Generic
 
 
-// Utilities
+// Types
 
-// Line feed.
-let LF = 10uy
+
+type RGB = {Red : byte; Green : byte; Blue : byte}
+
+type Pixel =
+    | GrayPixel of byte
+    | RGBPixel of RGB
 
 // The position in an image.
 type Position = {Column : int; Row : int}
 
-// Translate an index into a virtual Position.
-let funcCalcVirtualPosition numColumns index =
-    {Column = index % numColumns; Row = index / numColumns}
+type ImageMetadata = {BytesPerPixel : int; PixelsPerRow : int}
+
+let BlackPixel = RGBPixel {Red = 0uy; Green = 0uy; Blue = 0uy}
+let GrayPixel = RGBPixel {Red = 128uy; Green = 128uy; Blue = 128uy}
+let WhitePixel = RGBPixel {Red = 255uy; Green = 255uy; Blue = 255uy}
+
+let BinaryGray = "P5"
+let BinaryRGB = "P6"
+
+
+// Utilities
+
+
+// Translate an index into a Position.
+let funcCalcPosition (imageMetadata : ImageMetadata) index =
+    {Column = index % imageMetadata.PixelsPerRow; Row = index / imageMetadata.PixelsPerRow}
 
 // Translate a Position to an index.
-let funcCalcIndexOfPosition numColumns (position : Position) =
-    position.Row * numColumns + position.Column
+let funcCalcIndexOfPosition (imageMetadata : ImageMetadata) (position : Position) =
+    position.Row * imageMetadata.PixelsPerRow * imageMetadata.BytesPerPixel + position.Column * imageMetadata.BytesPerPixel
 
 // Generate a set of random numbers.
 let funcRandomNumbers (rnd : System.Random) exclusiveMax count = 
@@ -38,6 +55,7 @@ let funcRandomNumbers (rnd : System.Random) exclusiveMax count =
         rnd.Next exclusiveMax |> chosen.Add |> ignore
     chosen
 
+// Chain of Responsibility.
 // Scan through a list of functions until one of the functions returns a Some.
 let rec scanUntilSome theFunctionList theArg =
     match theFunctionList with
@@ -48,36 +66,48 @@ let rec scanUntilSome theFunctionList theArg =
                 | Some _ -> result
                 | None -> scanUntilSome tail theArg
 
+// Writes a Pixel correctly.
+let funcWritePixel (write : byte -> unit) = function
+    | GrayPixel p ->
+        write p
+    | RGBPixel p ->
+        write p.Red
+        write p.Green
+        write p.Blue
+
+// Writes the given text followed by a LineFeed.
+// On Windows OS the system WriteLine function seems to write CRLF.
+let funcWriteLF (writer : StreamWriter) (text : string) =
+    writer.Write text
+    writer.Write "\n"
+
 
 // Pipeline handling code
 
-// Change all even Rows to black.
-let funcInterlacing (position : Position) =
-    if position.Row % 2 = 0 then Some 0uy
-    else None
 
-// Change all 'None' to the given gray value.
-let funcByteHandler (noneValue : byte) = function
-    | Some b -> b
-    | None -> noneValue
+// Change all even Rows to the given Pixel.
+let funcInterlace (pixel : Pixel) (handler : Position -> Pixel) (position : Position) =
+    if position.Row % 2 = 0 then pixel
+    else handler position
 
-// Push some pixels down based on Column and Row.
-let funcSkew (positionHandler : Position -> byte option) (position : Position) =
-    let skewed = {Column = position.Column; Row = position.Row - (position.Column/2)}
-    if skewed.Row < 0 then
-        None
-    else
-        positionHandler skewed
-
-// Let a positionHandler handle an area of pixels.
-let funcEmbed (topLeftInclusive : Position) (bottomRightExclusive : Position) (positionHandler : Position -> byte option) (position : Position) =
+// An area of pixels is handled by one function and all other pixels by another function.
+let funcEmbed (topLeftInclusive : Position) (bottomRightExclusive : Position) (insideHandler : Position -> Pixel) (outsideHandler : Position -> Pixel) (position : Position) =
     if position.Column >= topLeftInclusive.Column && position.Column < bottomRightExclusive.Column && position.Row >= topLeftInclusive.Row && position.Row < bottomRightExclusive.Row then
-        positionHandler {Column = position.Column - topLeftInclusive.Column; Row = position.Row - topLeftInclusive.Row}
+        insideHandler position
     else
-        None
+        outsideHandler position
+
+// Shift the given Position by some amount.
+let funcShift columnShift rowShift (position : Position) =
+    {Column = position.Column + columnShift; Row = position.Row + rowShift}
+
+// Randomly pick a nearby Pixel.    
+let funcJitter (rnd : System.Random) (position : Position) = 
+    {Column = position.Column + (rnd.Next 3) - 1; Row = position.Row + (rnd.Next 3) - 1}
 
 
-// Column/Row mapping code
+// Column/Row mapping code -- WIP!
+
 
 // What to do with a column/row.
 type Action =
@@ -128,62 +158,66 @@ let main argv =
     printfn "args: %A" argv
     
     // Hardcoded source image info.
-    let sourcePath = "C:\Users\gregg\Downloads\Test.pgm"
+    let sourcePath = "C:/Users/ggabelmann/Downloads/test.ppm"
     let skip = 38 // skip some header bytes in the source image.
-    let sourceRows = 525
+    let sourceRows = 680
     let sourceColumns = 850
+    let imageMetadata = {BytesPerPixel = 3; PixelsPerRow = sourceColumns}
 
     let rnd = System.Random ()
     let funcSetOfRandomNumbers = funcRandomNumbers rnd
     
+    // Stretching is being refactored.
+
     // Remove 85 columns.
     let removeColumns = funcSetOfRandomNumbers sourceColumns 85
     // Add 85 new columns. Don't allow the rightmost column to be picked because of the way the interpolation alg works.
     let chosenColumns = funcSetOfRandomNumbers (sourceColumns - 1) 85
     let columnMapping = funcCalcMapping removeColumns chosenColumns sourceColumns
 
-    let removeRows = funcSetOfRandomNumbers sourceRows 52
-    let chosenRows = funcSetOfRandomNumbers (sourceRows - 1) 52
+    let removeRows = funcSetOfRandomNumbers sourceRows 0
+    let chosenRows = funcSetOfRandomNumbers (sourceRows - 1) 0
     let rowMapping = funcCalcMapping removeRows chosenRows sourceRows
-
-    let destPath = "C:\Users\gregg\Downloads\Test_stretched.pgm"
 
     let mappingRows = sourceRows - removeRows.Count + chosenRows.Count
     let mappingColumns = sourceColumns - removeColumns.Count + chosenColumns.Count
+
+    // end Stretching
 
     let canvasRows = mappingRows + 10
     let canvasColumns = mappingColumns + 10
     let dimensions = String.Format ("{0} {1}", canvasColumns, canvasRows)
     
+    let destPath = "C:/Users/ggabelmann/Downloads/test_out.ppm"
     use streamWriter = new StreamWriter(destPath, false)
-    streamWriter.WriteLine "P5"
-    streamWriter.WriteLine dimensions
-    streamWriter.Write "255"
+    let funcWriteLine = funcWriteLF streamWriter
+
+    funcWriteLine BinaryRGB
+    funcWriteLine dimensions
+    funcWriteLine "255"
     streamWriter.Flush ()
-    // On windows the header contains CRLFs so far.
-    // Now force only a LF to be used because IrfanView expects a single byte newline char after the "255".
-    streamWriter.BaseStream.WriteByte LF
 
     let allBytes = File.ReadAllBytes sourcePath
 
-    let funcSquishAndStretch (position : Position) =
-        let mappedPosition = funcMapVirtualPosition rnd rowMapping columnMapping position
-        Some allBytes.[skip + (funcCalcIndexOfPosition sourceColumns mappedPosition)]
-    
-    let funcBorderAroundWarp = 
-        funcEmbed
-            {Column = 5; Row = 5}
-            {Column = mappingColumns + 5; Row = mappingRows + 5}
-            (funcSkew funcSquishAndStretch)
+    let funcLookupSourcePixels (position : Position) =
+        let index = skip + (funcCalcIndexOfPosition imageMetadata position)
+        RGBPixel {Red = allBytes.[index]; Green = allBytes.[index + 1]; Blue = allBytes.[index + 2]}
 
-    let funcConsumePosition =
-        (scanUntilSome [funcInterlacing; funcBorderAroundWarp]) >>
-        (funcByteHandler 255uy) >>
-        streamWriter.BaseStream.WriteByte
+    let funcMapPositionToPixel = 
+        funcInterlace
+            (BlackPixel)
+            (funcEmbed
+                {Column = 5; Row = 5}
+                {Column = 600; Row = 600}
+                ((funcJitter rnd) >> funcLookupSourcePixels)
+                (fun pos -> WhitePixel))
+    
+    let funcPixelWriter =
+        funcWritePixel streamWriter.BaseStream.WriteByte
 
     for row in 0 .. canvasRows - 1 do
         for column in 0 .. canvasColumns - 1 do
-            funcConsumePosition {Column = column; Row = row}
+            {Column = column; Row = row} |> (funcMapPositionToPixel >> funcPixelWriter)
 
     streamWriter.Close()
 
