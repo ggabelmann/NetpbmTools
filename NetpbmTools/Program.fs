@@ -2,7 +2,7 @@
 
 // Overall, the tool loops over a function that translates Positions to Pixels.
 // The input to that function and its output will eventually be stdin/stdout.
-// The implementation of that function will be a DAG of functions:
+// The implementation of that function is a DAG of functions:
 //    Position -> Pixel
 //    Position -> Position
 //    Pixel -> Pixel
@@ -33,6 +33,7 @@ let BlackPixel = RGBPixel {Red = 0uy; Green = 0uy; Blue = 0uy}
 let GrayPixel = RGBPixel {Red = 128uy; Green = 128uy; Blue = 128uy}
 let WhitePixel = RGBPixel {Red = 255uy; Green = 255uy; Blue = 255uy}
 
+// Magic number in PPM file format.
 let BinaryGray = "P5"
 let BinaryRGB = "P6"
 
@@ -55,8 +56,8 @@ let funcRandomNumbers (rnd : System.Random) exclusiveMax count =
         rnd.Next exclusiveMax |> chosen.Add |> ignore
     chosen
 
-// Chain of Responsibility.
 // Scan through a list of functions until one of the functions returns a Some.
+// Chain of Responsibility pattern.
 let rec scanUntilSome theFunctionList theArg =
     match theFunctionList with
         | [] -> None
@@ -66,7 +67,7 @@ let rec scanUntilSome theFunctionList theArg =
                 | Some _ -> result
                 | None -> scanUntilSome tail theArg
 
-// Writes a Pixel correctly.
+// Writes a Pixel out based on its type.
 let funcWritePixel (write : byte -> unit) = function
     | GrayPixel p ->
         write p
@@ -76,7 +77,7 @@ let funcWritePixel (write : byte -> unit) = function
         write p.Blue
 
 // Writes the given text followed by a LineFeed.
-// On Windows OS the system WriteLine function seems to write CRLF.
+// On Windows OS the system WriteLine function seems to write CRLF (which causes problems for IrfanView).
 let funcWriteLF (writer : StreamWriter) (text : string) =
     writer.Write text
     writer.Write "\n"
@@ -91,6 +92,7 @@ let funcInterlace (pixel : Pixel) (handler : Position -> Pixel) (position : Posi
     else handler position
 
 // An area of pixels is handled by one function and all other pixels by another function.
+// The position is not shifted.
 let funcEmbed (topLeftInclusive : Position) (bottomRightExclusive : Position) (insideHandler : Position -> Pixel) (outsideHandler : Position -> Pixel) (position : Position) =
     if position.Column >= topLeftInclusive.Column && position.Column < bottomRightExclusive.Column && position.Row >= topLeftInclusive.Row && position.Row < bottomRightExclusive.Row then
         insideHandler position
@@ -101,7 +103,8 @@ let funcEmbed (topLeftInclusive : Position) (bottomRightExclusive : Position) (i
 let funcShift columnShift rowShift (position : Position) =
     {Column = position.Column + columnShift; Row = position.Row + rowShift}
 
-// Randomly pick a nearby Pixel.    
+// Randomly pick a nearby Pixel.
+// Values may be negative, but that can be handled by a subsequent function.
 let funcJitter (rnd : System.Random) (position : Position) = 
     {Column = position.Column + (rnd.Next 3) - 1; Row = position.Row + (rnd.Next 3) - 1}
 
@@ -153,6 +156,7 @@ let funcMapVirtualPosition (rnd : System.Random) (rowMapping : Map<int, Action>)
     {Column = sourceColumn; Row = sourceRow}
 
 
+// Most of this is hardcoded as I explore F# and how image manipulation works.
 [<EntryPoint>]
 let main argv = 
     printfn "args: %A" argv
@@ -191,18 +195,23 @@ let main argv =
     let destPath = "C:/Users/ggabelmann/Downloads/test_out.ppm"
     use streamWriter = new StreamWriter(destPath, false)
     let funcWriteLine = funcWriteLF streamWriter
-
+    
+    // Write to the dest file.
     funcWriteLine BinaryRGB
     funcWriteLine dimensions
     funcWriteLine "255"
     streamWriter.Flush ()
 
+    // Read in the source image so that all columns/rows are in memory.
     let allBytes = File.ReadAllBytes sourcePath
 
+    // Return an RGB Pixel from allBytes.
     let funcLookupSourcePixels (position : Position) =
         let index = skip + (funcCalcIndexOfPosition imageMetadata position)
         RGBPixel {Red = allBytes.[index]; Green = allBytes.[index + 1]; Blue = allBytes.[index + 2]}
 
+    // The core function.
+    // In this case, a square of the original image is jittered, everything else is white, and finally black lines over it all.
     let funcMapPositionToPixel = 
         funcInterlace
             (BlackPixel)
@@ -215,6 +224,7 @@ let main argv =
     let funcPixelWriter =
         funcWritePixel streamWriter.BaseStream.WriteByte
 
+    // Loop through the "output canvas", calculate each Pixel, and write it out.
     for row in 0 .. canvasRows - 1 do
         for column in 0 .. canvasColumns - 1 do
             {Column = column; Row = row} |> (funcMapPositionToPixel >> funcPixelWriter)
