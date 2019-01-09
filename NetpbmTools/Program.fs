@@ -11,8 +11,10 @@
 // This should cover my main use cases (stretching and shrinking in different ways).
 
 open System
-open System.IO
 open System.Collections.Generic
+open System.IO
+open System.Text
+open FParsec
 
 
 // Types
@@ -27,7 +29,7 @@ type Pixel =
 // The position in an image.
 type Position = {Column : int; Row : int}
 
-type ImageMetadata = {BytesPerPixel : int; PixelsPerRow : int}
+type ImageMetadata = {NumHeaderBytes : int; BytesPerPixel : int; PixelsPerRow : int}
 
 let BlackPixel = RGBPixel {Red = 0uy; Green = 0uy; Blue = 0uy}
 let GrayPixel = RGBPixel {Red = 128uy; Green = 128uy; Blue = 128uy}
@@ -41,13 +43,9 @@ let BinaryRGB = "P6"
 // Utilities
 
 
-// Translate an index into a Position.
-let funcCalcPosition (imageMetadata : ImageMetadata) index =
-    {Column = index % imageMetadata.PixelsPerRow; Row = index / imageMetadata.PixelsPerRow}
-
-// Translate a Position to an index.
-let funcCalcIndexOfPosition (imageMetadata : ImageMetadata) (position : Position) =
-    position.Row * imageMetadata.PixelsPerRow * imageMetadata.BytesPerPixel + position.Column * imageMetadata.BytesPerPixel
+// Translate a Position to an index in a sequence of bytes.
+let funcCalcIndexOfPosition imageMetadata (position : Position) =
+    imageMetadata.NumHeaderBytes + imageMetadata.BytesPerPixel * (position.Row * imageMetadata.PixelsPerRow + position.Column)
 
 // Generate a set of random numbers.
 let funcRandomNumbers (rnd : System.Random) exclusiveMax count = 
@@ -161,18 +159,33 @@ let funcMapVirtualPosition (rnd : System.Random) (rowMapping : Map<int, Action>)
 let main argv = 
     printfn "args: %A" argv
     
-    // Hardcoded source image info.
+    // Hardcoded source image.
     let sourcePath = "C:/Users/ggabelmann/Downloads/test.ppm"
-    let skip = 38 // skip some header bytes in the source image.
-    let sourceRows = 680
-    let sourceColumns = 850
-    let imageMetadata = {BytesPerPixel = 3; PixelsPerRow = sourceColumns}
+    let allBytes = File.ReadAllBytes sourcePath
+
+    let ascii = new ASCIIEncoding()
+    let header = ascii.GetString allBytes.[..4095] // Consider the first 4096 bytes of the file, 0..4095 inclusive.
+
+    // Begin parsing the header.
+    let parseFormat = pstring "P6" .>> (many1 skipNewline)
+    let parseDimensions = puint16 .>> spaces1 .>>. puint16 .>> (many1 skipNewline)
+    let parseDepth = pstring "255" .>> skipNewline
+
+    let parseComment = pstring "#" >>. (restOfLine true)
+    let parseHeader = (many parseComment >>. parseFormat) >>. (many parseComment >>. parseDimensions) .>> (many parseComment >>. parseDepth)
+
+    let (sourceColumns, sourceRows, skip) =
+        match run parseHeader header with
+        | Success(result, _, pos) -> (int (fst result), int (snd result), int pos.Index)
+        | Failure(errorMsg, _, _) -> failwith errorMsg
+
+    let imageMetadata = {NumHeaderBytes = skip; BytesPerPixel = 3; PixelsPerRow = sourceColumns}
+    // End parsing the header.
 
     let rnd = System.Random ()
     let funcSetOfRandomNumbers = funcRandomNumbers rnd
     
-    // Stretching is being refactored.
-
+    // Stretching is being refactored... so ignore it for now.
     // Remove 85 columns.
     let removeColumns = funcSetOfRandomNumbers sourceColumns 85
     // Add 85 new columns. Don't allow the rightmost column to be picked because of the way the interpolation alg works.
@@ -185,7 +198,6 @@ let main argv =
 
     let mappingRows = sourceRows - removeRows.Count + chosenRows.Count
     let mappingColumns = sourceColumns - removeColumns.Count + chosenColumns.Count
-
     // end Stretching
 
     let canvasRows = mappingRows + 10
@@ -202,12 +214,8 @@ let main argv =
     funcWriteLine "255"
     streamWriter.Flush ()
 
-    // Read in the source image so that all columns/rows are in memory.
-    let allBytes = File.ReadAllBytes sourcePath
-
-    // Return an RGB Pixel from allBytes.
     let funcLookupSourcePixels (position : Position) =
-        let index = skip + (funcCalcIndexOfPosition imageMetadata position)
+        let index = funcCalcIndexOfPosition imageMetadata position
         RGBPixel {Red = allBytes.[index]; Green = allBytes.[index + 1]; Blue = allBytes.[index + 2]}
 
     // The core function.
@@ -217,7 +225,7 @@ let main argv =
             (BlackPixel)
             (funcEmbed
                 {Column = 5; Row = 5}
-                {Column = 600; Row = 600}
+                {Column = 505; Row = 505}
                 ((funcJitter rnd) >> funcLookupSourcePixels)
                 (fun pos -> WhitePixel))
     
